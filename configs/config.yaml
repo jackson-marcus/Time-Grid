@@ -1,0 +1,17 @@
+# Pipeline configuration. Paths relative to the repo root.
+
+data:
+  processed_dir: data/processed
+  artifacts_dir: data/artifacts
+  n_weeks: 156
+  regions: ["north", "south", "west"]
+  products: ["alpha", "beta", "gamma"]
+  seed: 42
+
+forecast:
+  horizon: 12
+  holdout_weeks: 24        # rolling-origin scored on the final 24 weeks
+  ridge_alpha: 1.0
+
+eval:
+  experiment_name: timegrid
