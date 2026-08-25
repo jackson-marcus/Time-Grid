@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from timegrid.hierarchy import leaf_name
 from timegrid.settings import get_config, resolve_path
 
 
@@ -32,13 +33,15 @@ def generate(n_weeks: int, regions: list[str], products: list[str], seed: int = 
             season = rng.uniform(0.08, 0.22) * base * np.sin(2 * np.pi * t / 52 + phase)
             promo = (rng.random(n_weeks) < 0.06) * rng.uniform(0.2, 0.5) * base
             noise = rng.normal(0, 0.05 * base, n_weeks)
-            frames[f"{region}/{product}"] = np.maximum(base + trend + season + promo + noise, 10)
+            frames[leaf_name(region, product)] = np.maximum(
+                base + trend + season + promo + noise, 10
+            )
 
     df = pd.DataFrame({"week": t})
     for name, series in frames.items():
         df[name] = np.round(series, 1)
     for region in regions:
-        df[region] = df[[f"{region}/{p}" for p in products]].sum(axis=1).round(1)
+        df[region] = df[[leaf_name(region, p) for p in products]].sum(axis=1).round(1)
     df["total"] = df[regions].sum(axis=1).round(1)
     return df
 

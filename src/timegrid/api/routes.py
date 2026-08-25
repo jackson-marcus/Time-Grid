@@ -1,4 +1,9 @@
-"""API routes: /leaderboard, /forecast, /whatif, /hierarchy, /health."""
+"""API routes: /leaderboard, /forecast, /whatif, /hierarchy, /health.
+
+Every route works from the composite tree returned by ``build_hierarchy()``:
+node names come from nodes, the region affected by a what-if comes from the
+leaf's ancestors, and coherence is asked of the root.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from timegrid.models.reconcile import coherence_error, hierarchy, reconcile
+from timegrid.hierarchy import METHODS, build_hierarchy, reconcile
 from timegrid.settings import get_config, resolve_path
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,13 @@ def _bundle() -> dict:
         return pickle.load(f)
 
 
+def _load_bundle() -> dict:
+    try:
+        return _bundle()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -39,33 +51,31 @@ def health() -> dict[str, str]:
 
 @router.get("/hierarchy")
 def get_hierarchy() -> dict:
-    h = hierarchy()
-    return {"total": "total", "regions": h["middle"], "bottom": h["bottom"]}
+    root = build_hierarchy()
+    return {
+        "total": root.name,
+        "regions": [child.name for child in root.children],
+        "bottom": [leaf.name for leaf in root.leaves()],
+    }
 
 
 @router.get("/leaderboard")
 def leaderboard() -> dict:
-    try:
-        bundle = _bundle()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"metrics": bundle["metrics"]}
+    return {"metrics": _load_bundle()["metrics"]}
 
 
 @router.get("/forecast")
 def forecast(method: str = "ols") -> dict:
-    if method not in {"base", "bottom_up", "top_down", "ols"}:
+    if method not in METHODS:
         raise HTTPException(status_code=422, detail="method must be base|bottom_up|top_down|ols")
-    try:
-        bundle = _bundle()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    forecasts = reconcile(bundle["base"], method, bundle["shares"])
-    weeks = [bundle["last_week"] + 1 + i for i in range(len(forecasts["total"]))]
+    bundle = _load_bundle()
+    root = build_hierarchy()
+    forecasts = reconcile(root, bundle["base"], method, bundle["shares"])
+    weeks = [bundle["last_week"] + 1 + i for i in range(len(forecasts[root.name]))]
     return {
         "method": method,
         "weeks": weeks,
-        "coherence_error": coherence_error(forecasts),
+        "coherence_error": root.coherence_error(forecasts),
         "forecasts": {name: np.round(values, 1).tolist() for name, values in forecasts.items()},
         "history_tail": bundle["history_tail"],
     }
@@ -73,33 +83,29 @@ def forecast(method: str = "ols") -> dict:
 
 @router.post("/whatif")
 def whatif(request: WhatIfRequest) -> dict:
-    try:
-        bundle = _bundle()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    h = hierarchy()
-    if request.series not in h["bottom"]:
-        raise HTTPException(status_code=404, detail=f"series must be a bottom node: {h['bottom']}")
+    bundle = _load_bundle()
+    root = build_hierarchy()
+    leaf_names = [leaf.name for leaf in root.leaves()]
+    if request.series not in leaf_names:
+        raise HTTPException(status_code=404, detail=f"series must be a bottom node: {leaf_names}")
+    leaf = root.find(request.series)
 
     # baseline and scenario must use the SAME reconciliation (bottom-up), or the
     # delta would mostly measure the difference between reconciliation methods
-    baseline = reconcile(bundle["base"], "bottom_up", bundle["shares"])
+    baseline = reconcile(root, bundle["base"], "bottom_up")
     adjusted_base = {k: v.copy() for k, v in bundle["base"].items()}
-    bump = np.ones_like(adjusted_base[request.series])
+    bump = np.ones_like(adjusted_base[leaf.name])
     bump[: request.weeks] += request.uplift_pct / 100
-    adjusted_base[request.series] = adjusted_base[request.series] * bump
-    adjusted = reconcile(adjusted_base, "bottom_up", bundle["shares"])
+    adjusted_base[leaf.name] = adjusted_base[leaf.name] * bump
+    adjusted = reconcile(root, adjusted_base, "bottom_up")
 
     def delta(name: str) -> float:
         return round(float((adjusted[name] - baseline[name]).sum()), 1)
 
-    region = request.series.split("/")[0]
+    # the intervention is felt exactly by the leaf and everything that contains it
+    impact = {node.name: delta(node.name) for node in (leaf, *leaf.ancestors())}
     return {
         "scenario": request.model_dump(),
-        "impact": {
-            request.series: delta(request.series),
-            region: delta(region),
-            "total": delta("total"),
-        },
-        "coherence_error": coherence_error(adjusted),
+        "impact": impact,
+        "coherence_error": root.coherence_error(adjusted),
     }
