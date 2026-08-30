@@ -17,8 +17,6 @@
 
 </div>
 
-> **Portfolio project.** Built to demonstrate the Composite pattern and hierarchical-reconciliation methodology on synthetic KPI data. Not hardened for production use.
-
 ---
 
 ## The problem
